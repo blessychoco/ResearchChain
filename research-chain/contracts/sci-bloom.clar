@@ -292,23 +292,26 @@
 
 ;; Request a refund for a proposal
 (define-public (request-refund (proposal-id uint))
-  (let
-    (
-      (proposal (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
-      (funding (unwrap-panic (map-get? fundings { proposal-id: proposal-id, funder: tx-sender })))
+  (begin
+    (asserts! (is-valid-proposal-id proposal-id) ERR_INVALID_PROPOSAL_ID)
+    (let
+      (
+        (proposal (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
+        (funding (unwrap-panic (map-get? fundings { proposal-id: proposal-id, funder: tx-sender })))
+      )
+      (asserts! (is-refund-eligible { proposal-id: proposal-id }) ERR_REFUND_NOT_AVAILABLE)
+      (asserts! (> (get amount funding) u0) ERR_NOT_FUNDER)
+      (try! (as-contract (stx-transfer? (get amount funding) tx-sender tx-sender)))
+      (map-delete fundings { proposal-id: proposal-id, funder: tx-sender })
+      (map-set proposals
+        { proposal-id: proposal-id }
+        (merge proposal { 
+          current-funding: (- (get current-funding proposal) (get amount funding)),
+          status: STATUS_REFUNDABLE
+        })
+      )
+      (ok true)
     )
-    (asserts! (is-refund-eligible { proposal-id: proposal-id }) ERR_REFUND_NOT_AVAILABLE)
-    (asserts! (> (get amount funding) u0) ERR_NOT_FUNDER)
-    (try! (as-contract (stx-transfer? (get amount funding) tx-sender tx-sender)))
-    (map-delete fundings { proposal-id: proposal-id, funder: tx-sender })
-    (map-set proposals
-      { proposal-id: proposal-id }
-      (merge proposal { 
-        current-funding: (- (get current-funding proposal) (get amount funding)),
-        status: STATUS_REFUNDABLE
-      })
-    )
-    (ok true)
   )
 )
 
