@@ -1,5 +1,5 @@
 ;; ResearchChain: Decentralized Scientific Research Funding
-;; This contract allows researchers to submit proposals, reviewers to vote, and funders to support approved projects
+;; This contract allows researchers to submit proposals, reviewers to vote, funders to support approved projects, and implement a refund mechanism
 
 ;; Define constants
 (define-constant CONTRACT_OWNER tx-sender)
@@ -15,6 +15,8 @@
 (define-constant ERR_ALREADY_VOTED (err u109))
 (define-constant ERR_NOT_REVIEWER (err u110))
 (define-constant ERR_INVALID_REVIEWER (err u111))
+(define-constant ERR_NOT_FUNDER (err u112))
+(define-constant ERR_REFUND_NOT_AVAILABLE (err u113))
 
 ;; Define proposal statuses
 (define-constant STATUS_SUBMITTED u0)
@@ -24,6 +26,7 @@
 (define-constant STATUS_OPEN u4)
 (define-constant STATUS_FUNDED u5)
 (define-constant STATUS_CLOSED u6)
+(define-constant STATUS_REFUNDABLE u7)
 
 ;; Define vote options
 (define-constant VOTE_APPROVE u1)
@@ -40,7 +43,8 @@
     current-funding: uint,
     status: uint,
     approve-votes: uint,
-    reject-votes: uint
+    reject-votes: uint,
+    deadline: uint
   }
 )
 
@@ -62,6 +66,7 @@
 ;; Define variables
 (define-data-var proposal-counter uint u0)
 (define-data-var required-votes uint u3)
+(define-data-var funding-period uint u43200) ;; Default to 30 days (in blocks, assuming 1 block every 60 seconds)
 
 ;; Helper functions for input validation
 (define-private (is-valid-title (title (string-ascii 100)))
@@ -81,7 +86,7 @@
 )
 
 (define-private (is-valid-status (status uint))
-  (and (>= status STATUS_SUBMITTED) (<= status STATUS_CLOSED))
+  (and (>= status STATUS_SUBMITTED) (<= status STATUS_REFUNDABLE))
 )
 
 (define-private (is-reviewer (account principal))
@@ -99,6 +104,7 @@
     (let
       (
         (proposal-id (+ (var-get proposal-counter) u1))
+        (deadline (+ block-height (var-get funding-period)))
       )
       (map-set proposals
         { proposal-id: proposal-id }
@@ -110,7 +116,8 @@
           current-funding: u0,
           status: STATUS_SUBMITTED,
           approve-votes: u0,
-          reject-votes: u0
+          reject-votes: u0,
+          deadline: deadline
         }
       )
       (var-set proposal-counter proposal-id)
@@ -257,6 +264,54 @@
   )
 )
 
+;; Set funding period (only by CONTRACT_OWNER)
+(define-public (set-funding-period (new-funding-period uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (asserts! (> new-funding-period u0) ERR_INVALID_AMOUNT)
+    (var-set funding-period new-funding-period)
+    (ok true)
+  )
+)
+
+;; Check if a proposal is eligible for refund
+(define-private (is-refund-eligible (proposal { proposal-id: uint }))
+  (let
+    (
+      (proposal-data (unwrap-panic (map-get? proposals proposal)))
+    )
+    (or
+      (and
+        (< (get current-funding proposal-data) (get funding-goal proposal-data))
+        (> block-height (get deadline proposal-data))
+      )
+      (is-eq (get status proposal-data) STATUS_CLOSED)
+    )
+  )
+)
+
+;; Request a refund for a proposal
+(define-public (request-refund (proposal-id uint))
+  (let
+    (
+      (proposal (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
+      (funding (unwrap-panic (map-get? fundings { proposal-id: proposal-id, funder: tx-sender })))
+    )
+    (asserts! (is-refund-eligible { proposal-id: proposal-id }) ERR_REFUND_NOT_AVAILABLE)
+    (asserts! (> (get amount funding) u0) ERR_NOT_FUNDER)
+    (try! (as-contract (stx-transfer? (get amount funding) tx-sender tx-sender)))
+    (map-delete fundings { proposal-id: proposal-id, funder: tx-sender })
+    (map-set proposals
+      { proposal-id: proposal-id }
+      (merge proposal { 
+        current-funding: (- (get current-funding proposal) (get amount funding)),
+        status: STATUS_REFUNDABLE
+      })
+    )
+    (ok true)
+  )
+)
+
 ;; Read-only functions
 
 ;; Get proposal details
@@ -287,4 +342,14 @@
 ;; Get required votes
 (define-read-only (get-required-votes)
   (var-get required-votes)
+)
+
+;; Get funding period
+(define-read-only (get-funding-period)
+  (var-get funding-period)
+)
+
+;; Check if a proposal is eligible for refund
+(define-read-only (check-refund-eligibility (proposal-id uint))
+  (is-refund-eligible { proposal-id: proposal-id })
 )
