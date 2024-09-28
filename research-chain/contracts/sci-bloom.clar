@@ -57,19 +57,20 @@
 (define-public (fund-proposal (proposal-id uint) (amount uint))
   (let
     (
-      (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) (err ERR_PROPOSAL_NOT_FOUND)))
+      (proposal (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
       (new-funding (+ (get current-funding proposal) amount))
     )
     (asserts! (> amount u0) ERR_INVALID_AMOUNT)
     (asserts! (get is-active proposal) ERR_ALREADY_FUNDED)
+    (asserts! (< new-funding (get funding-goal proposal)) (err u104))
     (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
     (map-set proposals
       { proposal-id: proposal-id }
-      (merge proposal { current-funding: new-funding, is-active: (< new-funding (get funding-goal proposal)) })
+      (merge proposal { current-funding: new-funding })
     )
     (map-set fundings
       { proposal-id: proposal-id, funder: tx-sender }
-      { amount: (default-to u0 (get amount (map-get? fundings { proposal-id: proposal-id, funder: tx-sender }))) }
+      { amount: (+ amount (default-to u0 (get amount (map-get? fundings { proposal-id: proposal-id, funder: tx-sender })))) }
     )
     (ok true)
   )
@@ -79,10 +80,11 @@
 (define-public (withdraw-funds (proposal-id uint))
   (let
     (
-      (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) (err ERR_PROPOSAL_NOT_FOUND)))
+      (proposal (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
     )
     (asserts! (is-eq (get researcher proposal) tx-sender) ERR_NOT_AUTHORIZED)
     (asserts! (>= (get current-funding proposal) (get funding-goal proposal)) ERR_INVALID_AMOUNT)
+    (asserts! (get is-active proposal) ERR_ALREADY_FUNDED)
     (try! (as-contract (stx-transfer? (get current-funding proposal) tx-sender (get researcher proposal))))
     (map-set proposals
       { proposal-id: proposal-id }
