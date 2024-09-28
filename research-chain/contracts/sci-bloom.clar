@@ -11,6 +11,12 @@
 (define-constant ERR_INVALID_DESCRIPTION (err u105))
 (define-constant ERR_INVALID_FUNDING_GOAL (err u106))
 (define-constant ERR_INVALID_PROPOSAL_ID (err u107))
+(define-constant ERR_INVALID_STATUS (err u108))
+
+;; Define proposal statuses
+(define-constant STATUS_OPEN u0)
+(define-constant STATUS_FUNDED u1)
+(define-constant STATUS_CLOSED u2)
 
 ;; Define data maps
 (define-map proposals
@@ -21,7 +27,7 @@
     description: (string-ascii 1000),
     funding-goal: uint,
     current-funding: uint,
-    is-active: bool
+    status: uint
   }
 )
 
@@ -50,6 +56,10 @@
   (<= proposal-id (var-get proposal-counter))
 )
 
+(define-private (is-valid-status (status uint))
+  (or (is-eq status STATUS_OPEN) (is-eq status STATUS_FUNDED) (is-eq status STATUS_CLOSED))
+)
+
 ;; Public functions
 
 ;; Submit a new research proposal
@@ -70,7 +80,7 @@
           description: description,
           funding-goal: funding-goal,
           current-funding: u0,
-          is-active: true
+          status: STATUS_OPEN
         }
       )
       (var-set proposal-counter proposal-id)
@@ -89,12 +99,15 @@
         (proposal (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
         (new-funding (+ (get current-funding proposal) amount))
       )
-      (asserts! (get is-active proposal) ERR_ALREADY_FUNDED)
+      (asserts! (is-eq (get status proposal) STATUS_OPEN) ERR_ALREADY_FUNDED)
       (asserts! (<= new-funding (get funding-goal proposal)) ERR_INVALID_AMOUNT)
       (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
       (map-set proposals
         { proposal-id: proposal-id }
-        (merge proposal { current-funding: new-funding })
+        (merge proposal {
+          current-funding: new-funding,
+          status: (if (is-eq new-funding (get funding-goal proposal)) STATUS_FUNDED STATUS_OPEN)
+        })
       )
       (map-set fundings
         { proposal-id: proposal-id, funder: tx-sender }
@@ -114,12 +127,30 @@
         (proposal (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
       )
       (asserts! (is-eq (get researcher proposal) tx-sender) ERR_NOT_AUTHORIZED)
-      (asserts! (>= (get current-funding proposal) (get funding-goal proposal)) ERR_INVALID_AMOUNT)
-      (asserts! (get is-active proposal) ERR_ALREADY_FUNDED)
+      (asserts! (is-eq (get status proposal) STATUS_FUNDED) ERR_INVALID_STATUS)
       (try! (as-contract (stx-transfer? (get current-funding proposal) tx-sender (get researcher proposal))))
       (map-set proposals
         { proposal-id: proposal-id }
-        (merge proposal { current-funding: u0, is-active: false })
+        (merge proposal { current-funding: u0, status: STATUS_CLOSED })
+      )
+      (ok true)
+    )
+  )
+)
+
+;; Update proposal status (only by CONTRACT_OWNER)
+(define-public (update-proposal-status (proposal-id uint) (new-status uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (asserts! (is-valid-proposal-id proposal-id) ERR_INVALID_PROPOSAL_ID)
+    (asserts! (is-valid-status new-status) ERR_INVALID_STATUS)
+    (let
+      (
+        (proposal (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
+      )
+      (map-set proposals
+        { proposal-id: proposal-id }
+        (merge proposal { status: new-status })
       )
       (ok true)
     )
@@ -141,4 +172,9 @@
 ;; Get funding amount for a specific proposal and funder
 (define-read-only (get-funding (proposal-id uint) (funder principal))
   (map-get? fundings { proposal-id: proposal-id, funder: funder })
+)
+
+;; Get proposal status
+(define-read-only (get-proposal-status (proposal-id uint))
+  (get status (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
 )
