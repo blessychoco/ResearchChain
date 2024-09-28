@@ -14,6 +14,7 @@
 (define-constant ERR_INVALID_STATUS (err u108))
 (define-constant ERR_ALREADY_VOTED (err u109))
 (define-constant ERR_NOT_REVIEWER (err u110))
+(define-constant ERR_INVALID_REVIEWER (err u111))
 
 ;; Define proposal statuses
 (define-constant STATUS_SUBMITTED u0)
@@ -230,6 +231,7 @@
 (define-public (add-reviewer (reviewer principal))
   (begin
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (asserts! (not (is-eq reviewer CONTRACT_OWNER)) ERR_INVALID_REVIEWER)
     (map-set reviewers { reviewer: reviewer } { is-active: true })
     (ok true)
   )
@@ -239,6 +241,7 @@
 (define-public (remove-reviewer (reviewer principal))
   (begin
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (asserts! (not (is-eq reviewer CONTRACT_OWNER)) ERR_INVALID_REVIEWER)
     (map-delete reviewers { reviewer: reviewer })
     (ok true)
   )
