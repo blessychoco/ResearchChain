@@ -1,5 +1,5 @@
-;; ScienceBloom: Decentralized Scientific Research Funding
-;; This contract allows researchers to submit proposals and receive funding
+;; ResearchChain: Decentralized Scientific Research Funding
+;; This contract allows researchers to submit proposals, reviewers to vote, and funders to support approved projects
 
 ;; Define constants
 (define-constant CONTRACT_OWNER tx-sender)
@@ -12,11 +12,21 @@
 (define-constant ERR_INVALID_FUNDING_GOAL (err u106))
 (define-constant ERR_INVALID_PROPOSAL_ID (err u107))
 (define-constant ERR_INVALID_STATUS (err u108))
+(define-constant ERR_ALREADY_VOTED (err u109))
+(define-constant ERR_NOT_REVIEWER (err u110))
 
 ;; Define proposal statuses
-(define-constant STATUS_OPEN u0)
-(define-constant STATUS_FUNDED u1)
-(define-constant STATUS_CLOSED u2)
+(define-constant STATUS_SUBMITTED u0)
+(define-constant STATUS_UNDER_REVIEW u1)
+(define-constant STATUS_APPROVED u2)
+(define-constant STATUS_REJECTED u3)
+(define-constant STATUS_OPEN u4)
+(define-constant STATUS_FUNDED u5)
+(define-constant STATUS_CLOSED u6)
+
+;; Define vote options
+(define-constant VOTE_APPROVE u1)
+(define-constant VOTE_REJECT u0)
 
 ;; Define data maps
 (define-map proposals
@@ -27,7 +37,9 @@
     description: (string-ascii 1000),
     funding-goal: uint,
     current-funding: uint,
-    status: uint
+    status: uint,
+    approve-votes: uint,
+    reject-votes: uint
   }
 )
 
@@ -36,8 +48,19 @@
   { amount: uint }
 )
 
+(define-map reviewers
+  { reviewer: principal }
+  { is-active: bool }
+)
+
+(define-map votes
+  { proposal-id: uint, reviewer: principal }
+  { vote: uint }
+)
+
 ;; Define variables
 (define-data-var proposal-counter uint u0)
+(define-data-var required-votes uint u3)
 
 ;; Helper functions for input validation
 (define-private (is-valid-title (title (string-ascii 100)))
@@ -57,7 +80,11 @@
 )
 
 (define-private (is-valid-status (status uint))
-  (or (is-eq status STATUS_OPEN) (is-eq status STATUS_FUNDED) (is-eq status STATUS_CLOSED))
+  (and (>= status STATUS_SUBMITTED) (<= status STATUS_CLOSED))
+)
+
+(define-private (is-reviewer (account principal))
+  (default-to false (get is-active (map-get? reviewers { reviewer: account })))
 )
 
 ;; Public functions
@@ -80,11 +107,53 @@
           description: description,
           funding-goal: funding-goal,
           current-funding: u0,
-          status: STATUS_OPEN
+          status: STATUS_SUBMITTED,
+          approve-votes: u0,
+          reject-votes: u0
         }
       )
       (var-set proposal-counter proposal-id)
       (ok proposal-id)
+    )
+  )
+)
+
+;; Vote on a proposal (only for reviewers)
+(define-public (vote-on-proposal (proposal-id uint) (vote uint))
+  (begin
+    (asserts! (is-reviewer tx-sender) ERR_NOT_REVIEWER)
+    (asserts! (is-valid-proposal-id proposal-id) ERR_INVALID_PROPOSAL_ID)
+    (asserts! (or (is-eq vote VOTE_APPROVE) (is-eq vote VOTE_REJECT)) ERR_INVALID_STATUS)
+    (let
+      (
+        (proposal (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
+        (existing-vote (map-get? votes { proposal-id: proposal-id, reviewer: tx-sender }))
+      )
+      (asserts! (is-eq (get status proposal) STATUS_UNDER_REVIEW) ERR_INVALID_STATUS)
+      (asserts! (is-none existing-vote) ERR_ALREADY_VOTED)
+      (map-set votes { proposal-id: proposal-id, reviewer: tx-sender } { vote: vote })
+      (if (is-eq vote VOTE_APPROVE)
+        (map-set proposals { proposal-id: proposal-id }
+          (merge proposal { approve-votes: (+ (get approve-votes proposal) u1) }))
+        (map-set proposals { proposal-id: proposal-id }
+          (merge proposal { reject-votes: (+ (get reject-votes proposal) u1) }))
+      )
+      (let
+        (
+          (updated-proposal (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
+          (total-votes (+ (get approve-votes updated-proposal) (get reject-votes updated-proposal)))
+        )
+        (if (>= total-votes (var-get required-votes))
+          (if (> (get approve-votes updated-proposal) (get reject-votes updated-proposal))
+            (map-set proposals { proposal-id: proposal-id }
+              (merge updated-proposal { status: STATUS_APPROVED }))
+            (map-set proposals { proposal-id: proposal-id }
+              (merge updated-proposal { status: STATUS_REJECTED }))
+          )
+          true
+        )
+      )
+      (ok true)
     )
   )
 )
@@ -99,7 +168,7 @@
         (proposal (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
         (new-funding (+ (get current-funding proposal) amount))
       )
-      (asserts! (is-eq (get status proposal) STATUS_OPEN) ERR_ALREADY_FUNDED)
+      (asserts! (is-eq (get status proposal) STATUS_OPEN) ERR_INVALID_STATUS)
       (asserts! (<= new-funding (get funding-goal proposal)) ERR_INVALID_AMOUNT)
       (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
       (map-set proposals
@@ -157,6 +226,34 @@
   )
 )
 
+;; Add a reviewer (only by CONTRACT_OWNER)
+(define-public (add-reviewer (reviewer principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (map-set reviewers { reviewer: reviewer } { is-active: true })
+    (ok true)
+  )
+)
+
+;; Remove a reviewer (only by CONTRACT_OWNER)
+(define-public (remove-reviewer (reviewer principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (map-delete reviewers { reviewer: reviewer })
+    (ok true)
+  )
+)
+
+;; Set required votes (only by CONTRACT_OWNER)
+(define-public (set-required-votes (new-required-votes uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (asserts! (> new-required-votes u0) ERR_INVALID_AMOUNT)
+    (var-set required-votes new-required-votes)
+    (ok true)
+  )
+)
+
 ;; Read-only functions
 
 ;; Get proposal details
@@ -177,4 +274,14 @@
 ;; Get proposal status
 (define-read-only (get-proposal-status (proposal-id uint))
   (get status (unwrap-panic (map-get? proposals { proposal-id: proposal-id })))
+)
+
+;; Check if an account is a reviewer
+(define-read-only (is-active-reviewer (account principal))
+  (is-reviewer account)
+)
+
+;; Get required votes
+(define-read-only (get-required-votes)
+  (var-get required-votes)
 )
